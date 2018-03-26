@@ -1,12 +1,11 @@
 
 // CLI usage:
-// phantomjs [--ssl-protocol=any] ge-cancellation-checker.phantom.js [-v|--verbose]
+// phantomjs [--ssl-protocol=any] goes-checker.js [-v|--verbose]
 
 var system = require('system');
 var fs = require('fs');
 
 var VERBOSE = false;
-var loadInProgress = false;
 
 // Calculate path of this file
 var PWD = '';
@@ -16,7 +15,7 @@ else {
     current_path_arr.pop();
     PWD = current_path_arr.join('/');
 }
-
+var current_scheduled_date = '';
 // Gather Settings...
 try {
     var settings = JSON.parse(fs.read(PWD + '/config.json'));
@@ -35,12 +34,6 @@ system.args.forEach(function(val, i) {
     if (val == '-v' || val == '--verbose') { VERBOSE = true; }
 });
 
-function fireClick(el) {
-    var ev = document.createEvent("MouseEvents");
-    ev.initEvent("click", true, true);
-    el.dispatchEvent(ev);
-}
-
 var page = require('webpage').create();
 
 page.onConsoleMessage = function(msg) {
@@ -56,13 +49,21 @@ page.onError = function(msg, trace) {
 page.onCallback = function(query, msg) {
     if (query == 'username') { return settings.username; }
     if (query == 'password') { return settings.password; }
-    if (query == 'fireClick') {
-        return function() { return fireClick; } // @todo:david DON'T KNOW WHY THIS DOESN'T WORK! :( Just returns [Object object])
+    if (query == 'enrollment_location_id') { return settings.enrollment_location_id; }
+    if (query == 'scheduled_date') {
+      current_scheduled_date = msg;
+      return;
     }
     if (query == 'report-interview-time') {
-        if (VERBOSE) { console.log('Next available appointment is at: ' + msg); }
-        else { console.log(msg); }
-        return;  
+        if (VERBOSE) {
+          console.log('Next available appointment is at: ' + msg);
+          console.log('Current appointment is at: ' + current_scheduled_date);
+        }
+        else {
+          console.log(msg);
+          console.log(current_scheduled_date);
+        }
+        return;
     }
     if (query == 'fatal-error') {
         console.log('Fatal error: ' + msg);
@@ -71,34 +72,26 @@ page.onCallback = function(query, msg) {
     return null;
 }
 
-page.onLoadStarted = function() { loadInProgress = true; };
-page.onLoadFinished = function() { loadInProgress = false; };
 
-if (VERBOSE) { console.log('Please wait...'); }
-
-page.open(settings.init_url);
 var steps = [
     function() { // Log in
         page.evaluate(function() {
             console.log('On GOES login page...');
             document.querySelector('input[name=username]').value = window.callPhantom('username');
-
-            /* The GE Login page limits passwords to only 12 characters, but phantomjs can get around 
-               this limitation, which causes the fatal error "Unable to find terms acceptance button" */
-            document.querySelector('input[name=password]').value = window.callPhantom('password').substring(0,12);
+            document.querySelector('input[name=password]').value = window.callPhantom('password');
             document.querySelector('form[action="/pkmslogin.form"]').submit();
             console.log('Logging in...');
         });
     },
     function() { // Accept terms
         page.evaluate(function() {
-            
+
             function fireClick(el) {
                 var ev = document.createEvent("MouseEvents");
                 ev.initEvent("click", true, true);
                 el.dispatchEvent(ev);
             }
-            
+
             var $acceptTermsBtn = document.querySelector('a[href="/main/goes/HomePagePreAction.do"]');
 
             if (!$acceptTermsBtn) {
@@ -111,13 +104,12 @@ var steps = [
     },
     function() { // main dashboard
         page.evaluate(function() {
-
             function fireClick(el) {
                 var ev = document.createEvent("MouseEvents");
                 ev.initEvent("click", true, true);
                 el.dispatchEvent(ev);
             }
-            
+
             var $manageAptBtn = document.querySelector('.bluebutton[name=manageAptm]');
             if (!$manageAptBtn) {
                 return window.callPhantom('fatal-error', 'Unable to find Manage Appointment button');
@@ -128,16 +120,20 @@ var steps = [
         });
     },
     function() {
-        page.evaluate(function() {
 
+        page.evaluate(function() {
             function fireClick(el) {
                 var ev = document.createEvent("MouseEvents");
                 ev.initEvent("click", true, true);
                 el.dispatchEvent(ev);
             }
-            
+
+            var csd = jQuery('strong:contains("Interview Date")').parent().clone().children().remove().end().text().trim();
+            var cst = jQuery('strong:contains("Interview Time")').parent().clone().children().remove().end().text().trim();
+
+            window.callPhantom('scheduled_date', cst + ' ' + csd);
             var $rescheduleBtn = document.querySelector('input[name=reschedule]');
-    
+
             if (!$rescheduleBtn) {
                 return window.callPhantom('fatal-error', 'Unable to find reschedule button. Is it after or less than 24 hrs before your appointment?');
             }
@@ -147,66 +143,60 @@ var steps = [
         });
     },
     function() {
-        page.evaluate(function(location_id) {
+        page.evaluate(function() {
+            var locid = window.callPhantom('enrollment_location_id').toString();
 
-            function fireClick(el) {
-                var ev = document.createEvent("MouseEvents");
-                ev.initEvent("click", true, true);
-                el.dispatchEvent(ev);
-            }
-
-            document.querySelector('select[name=selectedEnrollmentCenter]').value = location_id;
-            fireClick(document.querySelector('input[name=next]'));
-
-            var location_name = document.querySelector('option[value="' + location_id + '"]').text;
-            console.log('Choosing Location: ' + location_name);
-        }, settings.enrollment_location_id.toString());
+            $('#selectedEnrollmentCenter')[0].value = locid;
+            $('input[name=next]')[0].click();
+            console.log('Choosing SFO...');
+        });
     },
     function() {
-
         page.evaluate(function() {
-
             // We made it! Now we have to scrape the page for the earliest available date
-            var date = document.querySelector('.date table tr:first-child td:first-child').innerHTML;
-            var month_year = document.querySelector('.date table tr:last-child td:last-child div').innerHTML;
+            var day = $('.currentDayCell')[0].textContent;
+            var month_year = $('.yearMonthHeader :nth-child(2)')[0].textContent;
+            var first_time = $('a.entry').first().text();
 
-            // Should get the first, earliest time, which is all I want. 
-            var time = document.querySelector('a.entry span').innerHTML;
-
-            var full_date = month_year.replace(',', ' ' + date + ',')
-
-            // console.log('');
-            //window.callPhantom('report-interview-time', full_date + ' ' +time)
+            var full_date = first_time + ' ' + month_year.replace(' ', ' ' + day + ', ');
             window.callPhantom('report-interview-time', full_date)
-
-            // Now let's determine if this is a time slot both earlier in the month, and earlier in the morning
-            // var isEarlyTime = Date.parse('01/01/2011 '+time) < Date.parse('01/01/2011 '+settings.current_interview_time_str);
-            // var isEarlyDate = Date.parse(full_date) < Date.parse(settings.current_interview_date_str);
-
-            var isEarlyTime = Date.parse('01/01/2011 '+time) < Date.parse('01/01/2011 08:45');
-            var isEarlyDate = Date.parse(full_date) <= Date.parse('September 2, 2016');
-            
-            if (isEarlyTime && isEarlyDate) {
-                console.log("There's a better option, YOU SHOULD RESCHEDULE!");
-                console.log("Early Possible Appointment: "+full_date+" "+time);
-            }
-            else {
-                console.log("You currently have the best date and time.");
-                console.log("Early Possible Appointment: "+full_date+" "+time);
-            }
-
         });
     }
 ];
 
-var i = 0;
-interval = setInterval(function() {
-    if (loadInProgress) { return; } // not ready yet...
-    if (typeof steps[i] != "function") {
-        return phantom.exit();
-    }
+var phantom_state = 'start';
 
-    steps[i]();
-    i++;
+page.onLoadFinished = function(status) {
+  if (status === 'success') {
+    page.includeJs("https://ajax.googleapis.com/ajax/libs/jquery/1.12.2/jquery.min.js", function() {
+      if (phantom_state == 'start') {
+        steps[0]();
+        phantom_state = 'accept';
+      }
+      else if (phantom_state == 'accept') {
+        steps[1]();
+        phantom_state = 'main';
+      }
+      else if (phantom_state == 'main') {
+        steps[2]();
+        phantom_state = 'current_interview';
+      }
+      else if (phantom_state == 'current_interview') {
+        steps[3]();
+        phantom_state = 'enrollment_center';
+      }
+      else if (phantom_state == 'enrollment_center') {
+        steps[4]();
+        phantom_state = 'get_date';
+      }
+      else if (phantom_state == 'get_date') {
+        steps[5]();
+        phantom.exit();
+      }
+    });
+  }
+};
 
-}, 100);
+if (VERBOSE) { console.log('Please wait...'); }
+
+page.open(settings.init_url);
